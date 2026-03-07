@@ -1,0 +1,16 @@
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: investment_db
+      POSTGRES_USER: investor
+      POSTGRES_PASSWORD: investment2026
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./sql:/docker-entrypoint-initdb.d
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
