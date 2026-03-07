@@ -18,7 +18,8 @@ CREATE TABLE IF NOT EXISTS trades (
     price       NUMERIC(12, 2) NOT NULL,
     quantity    INTEGER NOT NULL,
     account     VARCHAR(50),       -- 岡地現金, 住信SBI, SBI米株 等
-    created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (code, trade_date, trade_type, price, quantity, account)
 );
 
 -- 月次スナップショット（2026.x シート）
