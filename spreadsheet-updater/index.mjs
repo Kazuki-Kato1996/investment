@@ -174,6 +174,29 @@ async function scrapeSinyou(page) {
   return data;
 }
 
+async function scrapeSaitei(page) {
+  console.log('裁定買い残データを取得中...');
+  await page.goto('https://nikkei225jp.com/data/saitei.php', { waitUntil: 'networkidle' });
+  await page.waitForSelector('#datatbl tr td', { timeout: 10000 });
+
+  const data = await page.evaluate(() => {
+    const table = document.getElementById('datatbl');
+    const rows = table.querySelectorAll('tr');
+    const cells = rows[1].querySelectorAll('td');
+    return {
+      date: cells[0]?.textContent?.trim(),         // 日付
+      buyZan: cells[4]?.textContent?.trim(),        // 買い残（百万円）
+      sellZan: cells[5]?.textContent?.trim(),       // 売り残（百万円）
+      sabiki: cells[6]?.textContent?.trim(),        // 差引（百万円）
+      sabikiZenhi: cells[7]?.textContent?.trim(),   // 差引前比（百万円）
+    };
+  });
+
+  if (!data) throw new Error('裁定買い残データの取得に失敗しました');
+  console.log(`  日付: ${data.date}, 買残: ${data.buyZan}, 売残: ${data.sellZan}, 差引: ${data.sabiki}, 前比: ${data.sabikiZenhi}`);
+  return data;
+}
+
 async function scrapeShutai(page) {
   console.log('投資主体別データを取得中...');
   await page.goto('https://nikkei225jp.com/data/shutai.php', { waitUntil: 'networkidle' });
@@ -294,7 +317,7 @@ async function writePER(sheets, data, baibaiData) {
   return true;
 }
 
-async function writeSinyou(sheets, data, nikkeiPrice) {
+async function writeSinyou(sheets, data, nikkeiPrice, saiteiData) {
   console.log('信用倍率シートに書き込み中...');
   const sheetId = 798317965;
 
@@ -302,8 +325,8 @@ async function writeSinyou(sheets, data, nikkeiPrice) {
   const dateFormatted = data.date.replace(/-/g, '/');
 
   if (existingDates.some(d => d === dateFormatted)) {
-    // 既存行の信用評価率が空の場合は更新する
-    const updated = await updateMissingEvalRate(sheets, dateFormatted, data.evalRate);
+    // 既存行の信用評価率・裁定データが空の場合は更新する
+    const updated = await updateMissingSinyouFields(sheets, dateFormatted, data.evalRate, saiteiData);
     if (!updated) {
       console.log(`  ${dateFormatted} は既に入力済みです。スキップします。`);
     }
@@ -320,11 +343,16 @@ async function writeSinyou(sheets, data, nikkeiPrice) {
     '=D3/C3',                   // E: 信用倍率
     parseSignedNumber(data.evalRate), // F: 信用評価率
     nikkeiPrice || '',           // G: 日経株価
+    '',                          // H: （空き）
+    saiteiData ? parseNumber(saiteiData.buyZan) : '',   // I: 裁定買残
+    saiteiData ? parseNumber(saiteiData.sellZan) : '',   // J: 裁定売残
+    saiteiData ? parseNumber(saiteiData.sabiki) : '',    // K: 差引
+    saiteiData ? parseSignedNumber(saiteiData.sabikiZenhi) : '', // L: 差引全比
   ]];
 
   await sheets.spreadsheets.values.update({
     spreadsheetId: SPREADSHEET_ID,
-    range: "'信用倍率'!A3:G3",
+    range: "'信用倍率'!A3:L3",
     valueInputOption: 'USER_ENTERED',
     requestBody: { values },
   });
@@ -333,33 +361,57 @@ async function writeSinyou(sheets, data, nikkeiPrice) {
   return true;
 }
 
-// 既存行の信用評価率が空の場合に更新する
-async function updateMissingEvalRate(sheets, dateFormatted, evalRateStr) {
-  const evalRate = parseSignedNumber(evalRateStr);
-  if (evalRate === null) return false;
-
-  // B列とF列を取得して、該当日付の行を探す
+// 既存行の信用評価率・裁定データが空の場合に更新する
+async function updateMissingSinyouFields(sheets, dateFormatted, evalRateStr, saiteiData) {
+  // B列～L列を取得して、該当日付の行を探す
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId: SPREADSHEET_ID,
-    range: "'信用倍率'!B3:F52",
+    range: "'信用倍率'!B3:L52",
     valueRenderOption: 'FORMATTED_VALUE',
   });
 
   const rows = res.data.values || [];
   for (let i = 0; i < rows.length; i++) {
     const rowDate = rows[i][0]; // B列: 日付
-    const rowEvalRate = rows[i][4]; // F列: 信用評価率（B列からの相対位置）
-    if (rowDate === dateFormatted && (!rowEvalRate || rowEvalRate === '')) {
-      const rowNum = i + 3; // 行3から開始
-      await sheets.spreadsheets.values.update({
-        spreadsheetId: SPREADSHEET_ID,
+    if (rowDate !== dateFormatted) continue;
+
+    const rowNum = i + 3;
+    const batchData = [];
+
+    // F列: 信用評価率が空なら更新
+    const rowEvalRate = rows[i][4];
+    const evalRate = parseSignedNumber(evalRateStr);
+    if ((!rowEvalRate || rowEvalRate === '') && evalRate !== null) {
+      batchData.push({
         range: `'信用倍率'!F${rowNum}`,
-        valueInputOption: 'USER_ENTERED',
-        requestBody: { values: [[evalRate]] },
+        values: [[evalRate]],
       });
-      console.log(`  ${dateFormatted} の信用評価率を ${evalRate} に更新しました。`);
-      return true;
     }
+
+    // I~L列: 裁定データが空なら更新
+    const rowSaiteiI = rows[i][7]; // I列（B列からの相対位置7）
+    if ((!rowSaiteiI || rowSaiteiI === '') && saiteiData) {
+      batchData.push({
+        range: `'信用倍率'!I${rowNum}:L${rowNum}`,
+        values: [[
+          parseNumber(saiteiData.buyZan),
+          parseNumber(saiteiData.sellZan),
+          parseNumber(saiteiData.sabiki),
+          parseSignedNumber(saiteiData.sabikiZenhi),
+        ]],
+      });
+    }
+
+    if (batchData.length === 0) return false;
+
+    await sheets.spreadsheets.values.batchUpdate({
+      spreadsheetId: SPREADSHEET_ID,
+      requestBody: { valueInputOption: 'USER_ENTERED', data: batchData },
+    });
+
+    const fields = batchData.map(d => d.range.match(/!([A-Z])/)[1]).join(', ');
+    console.log(`  ${dateFormatted} の空フィールド(${fields}列)を更新しました。`);
+    return true;
   }
   return false;
 }
@@ -466,7 +518,8 @@ async function main() {
       }
 
       const sinyouData = await scrapeSinyou(page);
-      await writeSinyou(sheets, sinyouData, nikkeiPrice);
+      const saiteiData = await scrapeSaitei(page);
+      await writeSinyou(sheets, sinyouData, nikkeiPrice, saiteiData);
 
       const shutaiData = await scrapeShutai(page);
       await writeShutai(sheets, shutaiData);
