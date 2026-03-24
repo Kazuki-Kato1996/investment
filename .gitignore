@@ -1,3 +1,9 @@
 node_modules/
 dist/
 .env
+.DS_Store
+.playwright-mcp/
+*.log
+*.json
+!package.json
+!package-lock.json

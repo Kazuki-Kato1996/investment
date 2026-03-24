@@ -9,20 +9,21 @@
 - 投資関連情報の整理・可視化
 
 ## 技術スタック
-- Python（データ収集・分析）
+- Node.js / JavaScript（メイン）
+- Python（データ収集・分析スクリプト）
 
 ## ディレクトリ構成
 ```
 investment/
-├── CLAUDE.md
-├── data/          # 収集したデータ
-├── src/           # ソースコード
-│   ├── scraping/  # データ収集
-│   └── analysis/  # 分析
-└── notebooks/     # 分析用ノートブック
+├── api/                  # APIサーバー（Express）
+├── app/                  # フロントエンド
+├── morning-report/       # 朝の市場レポート自動送信
+├── scripts/              # Pythonスクリプト（価格取得・マイグレーション）
+├── spreadsheet-updater/  # Googleスプレッドシート更新・レポート生成
+└── sql/                  # DBスキーマ
 ```
 
 ## コーディング規約
-- 言語: Python 3.10+
 - コードのコメントは日本語
-- 変数名・関数名はスネークケース（snake_case）
+- JavaScript: ESM（import/export）を使用
+- Python: スネークケース（snake_case）

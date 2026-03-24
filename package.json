@@ -1,0 +1,25 @@
+{
+  "name": "investment",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Kazuki-Kato1996/investment.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/Kazuki-Kato1996/investment/issues"
+  },
+  "homepage": "https://github.com/Kazuki-Kato1996/investment#readme",
+  "dependencies": {
+    "mammoth": "^1.12.0",
+    "puppeteer-core": "^24.39.0"
+  }
+}
