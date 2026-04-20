@@ -21,6 +21,23 @@ const CREDENTIALS_PATH = join(__dirname, '..', 'investment-claude-e261a94c1e98.j
 const EMAIL_CONFIG_PATH = join(__dirname, '..', 'morning-report', 'market-report-config.json');
 const SPREADSHEET_ID = '12hycp-InFw3fGUkyMjdW9lvOWF8mOX6pWfJbEVV2RKk';
 
+// --- オーナーコメント読み取り（月次シートのE2:E6） ---
+async function readOwnerComment(sheets, sheetName) {
+  try {
+    const res = await sheets.spreadsheets.values.get({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `'${sheetName}'!E2:E6`,
+      valueRenderOption: 'FORMATTED_VALUE',
+    });
+    const rows = res.data.values || [];
+    const lines = rows.map(r => (r[0] || '').replace(/^\/\/\s?/, '').trim()).filter(l => l.length > 0);
+    return lines.join('\n');
+  } catch (e) {
+    console.error(`  オーナーコメント読み取りエラー: ${e.message}`);
+    return '';
+  }
+}
+
 // --- Google Sheets認証 ---
 function getSheets() {
   const credentials = JSON.parse(readFileSync(CREDENTIALS_PATH, 'utf8'));
@@ -309,6 +326,34 @@ function parseInvestorData(rows) {
   return data;
 }
 
+// --- オーナーコメントから銘柄別方針を抽出 ---
+function parseOwnerPolicies(ownerComment, allHoldings) {
+  if (!ownerComment) return {};
+  const policies = {};
+  // 銘柄名の出現位置でブロックを分割（銘柄名が登場する箇所〜次の銘柄名の手前まで）
+  const holdingNames = allHoldings.map(h => h.name).filter(n => n);
+  const text = ownerComment.replace(/\n/g, '');
+  for (const name of holdingNames) {
+    if (!text.includes(name)) continue;
+    // 銘柄名の出現位置を特定
+    const startIdx = text.indexOf(name);
+    // 次の銘柄名の出現位置を探す（現在の銘柄以降で最も近いもの）
+    let endIdx = text.length;
+    for (const otherName of holdingNames) {
+      if (otherName === name) continue;
+      const otherIdx = text.indexOf(otherName, startIdx + name.length);
+      if (otherIdx > startIdx && otherIdx < endIdx) {
+        endIdx = otherIdx;
+      }
+    }
+    // ブロックを抽出して末尾の句点を整理
+    let block = text.slice(startIdx, endIdx).trim();
+    if (!block.endsWith('。')) block += '。';
+    policies[name] = block;
+  }
+  return policies;
+}
+
 // --- データに基づく分析コメント・戦略・アクションプランの自動生成 ---
 function generateAnalysis(data) {
   const { annual, monthly, per, credit, investors } = data;
@@ -347,6 +392,9 @@ function generateAnalysis(data) {
   ].filter(h => h.holdingCost && h.plRate);
 
   const getRate = (h) => parseFloat(String(h.plRate).replace(/[%,]/g, '')) || 0;
+
+  // オーナーコメントから銘柄別方針を抽出
+  const ownerPolicies = parseOwnerPolicies(data.ownerComment, allHoldings);
 
   // 利確候補（+50%以上）
   const profitTakers = allHoldings
@@ -493,11 +541,21 @@ function generateAnalysis(data) {
   }
   portfolioStrategy += `</div>`;
 
+  // 単元株（100株）かどうか判定
+  const isMinUnit = (h) => parseNum(h.shares) <= 100;
+
   // 利確候補
   if (profitTakers.length > 0) {
     portfolioStrategy += `<div class="strategy-item"><p><strong>2. 利益確定検討銘柄（+50%超）</strong></p><ul>`;
     for (const h of profitTakers.slice(0, 5)) {
-      portfolioStrategy += `<li><strong>${h.name}(${h.code})</strong>: ${h.plRate} → 一部利確を推奨</li>`;
+      const policy = ownerPolicies[h.name];
+      if (policy) {
+        portfolioStrategy += `<li><strong>${h.name}(${h.code})</strong>: ${h.plRate} → <span style="color:#1a3a6b;">【オーナー方針】${policy}</span></li>`;
+      } else if (isMinUnit(h)) {
+        portfolioStrategy += `<li><strong>${h.name}(${h.code})</strong>: ${h.plRate}（${h.shares}株） → 単元株のため全売却or継続保有の判断が必要</li>`;
+      } else {
+        portfolioStrategy += `<li><strong>${h.name}(${h.code})</strong>: ${h.plRate}（${h.shares}株） → 一部利確を推奨</li>`;
+      }
     }
     portfolioStrategy += `</ul></div>`;
   }
@@ -506,7 +564,14 @@ function generateAnalysis(data) {
   if (stopLoss.length > 0) {
     portfolioStrategy += `<div class="risk-item"><p><strong>3. 損切り検討銘柄（-15%超）</strong></p><ul>`;
     for (const h of stopLoss.slice(0, 5)) {
-      portfolioStrategy += `<li><strong>${h.name}(${h.code})</strong>: ${h.plRate} → 損切りまたは見極めが必要</li>`;
+      const policy = ownerPolicies[h.name];
+      if (policy) {
+        portfolioStrategy += `<li><strong>${h.name}(${h.code})</strong>: ${h.plRate} → <span style="color:#1a3a6b;">【オーナー方針】${policy}</span></li>`;
+      } else if (isMinUnit(h)) {
+        portfolioStrategy += `<li><strong>${h.name}(${h.code})</strong>: ${h.plRate}（${h.shares}株） → 単元株のため全損切りor業績見極めの判断が必要</li>`;
+      } else {
+        portfolioStrategy += `<li><strong>${h.name}(${h.code})</strong>: ${h.plRate}（${h.shares}株） → 損切りまたは見極めが必要</li>`;
+      }
     }
     portfolioStrategy += `</ul></div>`;
   }
@@ -537,21 +602,40 @@ function generateAnalysis(data) {
 
   // 利確候補（+100%超は即実行、+50%超は今週中）
   for (const h of profitTakers.slice(0, 3)) {
-    const rate = getRate(h);
-    if (rate >= 100) {
-      actions.push({ priority: priority++, action: `${h.name} 一部利確`, timing: '今週中', reason: `${h.plRate}の利益確保` });
+    const policy = ownerPolicies[h.name];
+    if (policy) {
+      actions.push({ priority: priority++, action: `${h.name}【オーナー方針】`, timing: '-', reason: policy });
+    } else if (isMinUnit(h)) {
+      const rate = getRate(h);
+      if (rate >= 100) {
+        actions.push({ priority: priority++, action: `${h.name} 全売却判断`, timing: '今週中', reason: `${h.plRate}（${h.shares}株・単元株のため一部利確不可）` });
+      } else {
+        actions.push({ priority: priority++, action: `${h.name} 売却/保有判断`, timing: '今月中', reason: `${h.plRate}（${h.shares}株・単元株のため一部利確不可）` });
+      }
     } else {
-      actions.push({ priority: priority++, action: `${h.name} 利確検討`, timing: '今月中', reason: `${h.plRate}、上昇余地を見極め` });
+      const rate = getRate(h);
+      if (rate >= 100) {
+        actions.push({ priority: priority++, action: `${h.name} 一部利確`, timing: '今週中', reason: `${h.plRate}の利益確保` });
+      } else {
+        actions.push({ priority: priority++, action: `${h.name} 利確検討`, timing: '今月中', reason: `${h.plRate}、上昇余地を見極め` });
+      }
     }
   }
 
   // 損切り候補
   for (const h of stopLoss.slice(0, 3)) {
-    const rate = getRate(h);
-    if (rate <= -30) {
-      actions.push({ priority: priority++, action: `${h.name} 損切り`, timing: '今月中', reason: `含み損${h.plRate}の拡大防止` });
+    const policy = ownerPolicies[h.name];
+    if (policy) {
+      actions.push({ priority: priority++, action: `${h.name}【オーナー方針】`, timing: '-', reason: policy });
+    } else if (isMinUnit(h)) {
+      actions.push({ priority: priority++, action: `${h.name} 全損切り/継続判断`, timing: '決算後', reason: `含み損${h.plRate}（${h.shares}株・単元株のため一部損切り不可）` });
     } else {
-      actions.push({ priority: priority++, action: `${h.name} 見極め`, timing: '決算後', reason: `含み損${h.plRate}、業績確認後に判断` });
+      const rate = getRate(h);
+      if (rate <= -30) {
+        actions.push({ priority: priority++, action: `${h.name} 損切り`, timing: '今月中', reason: `含み損${h.plRate}の拡大防止` });
+      } else {
+        actions.push({ priority: priority++, action: `${h.name} 見極め`, timing: '決算後', reason: `含み損${h.plRate}、業績確認後に判断` });
+      }
     }
   }
 
@@ -576,6 +660,9 @@ function buildReportHTML(data) {
   });
 
   const { annual, monthly, per, credit, investors } = data;
+
+  // オーナーコメント読み取り
+  const ownerComment = data.ownerComment || '';
 
   // 分析コメント・戦略・アクションプラン生成
   const analysis = generateAnalysis(data);
@@ -673,11 +760,18 @@ function buildReportHTML(data) {
   .risk-item { background: #fdf5f5; border-left: 3px solid #cc3333; padding: 8px 12px; margin: 8px 0; font-size: 12px; }
   .strategy-item p, .risk-item p { margin: 3px 0; }
   .footer { color: #999; font-size: 10px; margin-top: 30px; border-top: 1px solid #ddd; padding-top: 10px; }
+  .owner-comment { background: #fff8e1; border: 2px solid #f9a825; border-radius: 5px; padding: 12px 16px; margin: 12px 0 16px; font-size: 13px; line-height: 1.6; }
+  .owner-comment .label { font-size: 11px; color: #f57f17; font-weight: bold; margin-bottom: 4px; }
 </style></head>
 <body>
 
 <h1>投資評価レポート・今後の投資戦略</h1>
 <p class="date">${today}作成</p>
+
+${ownerComment ? `<div class="owner-comment">
+  <div class="label">オーナーの見解・方針</div>
+  <p>${ownerComment.replace(/\n/g, '<br>')}</p>
+</div>` : ''}
 
 <!-- KPI -->
 <div class="kpi-grid">
@@ -963,12 +1057,13 @@ async function main() {
   console.log(`  対象月: ${currentMonthSheet}`);
 
   // 並列でデータ取得
-  const [annualRows, monthlyRows, perRows, creditRows, investorRows] = await Promise.all([
+  const [annualRows, monthlyRows, perRows, creditRows, investorRows, ownerComment] = await Promise.all([
     readSheet(sheets, '年間集計'),
     readSheet(sheets, currentMonthSheet),
     readSheet(sheets, 'PER推移'),
     readSheet(sheets, '信用倍率'),
     readSheet(sheets, '投資主体別'),
+    readOwnerComment(sheets, currentMonthSheet),
   ]);
 
   const data = {
@@ -977,6 +1072,7 @@ async function main() {
     per: parsePERData(perRows),
     credit: parseCreditData(creditRows),
     investors: parseInvestorData(investorRows),
+    ownerComment,
   };
 
   console.log(`  年間集計: ${data.annual.length}ヶ月分`);
