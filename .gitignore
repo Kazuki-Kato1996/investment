@@ -7,3 +7,6 @@ dist/
 *.json
 !package.json
 !package-lock.json
+
+# 保有データを含む個人情報フォルダ
+sbi-us-pdf/
